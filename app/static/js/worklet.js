@@ -161,12 +161,21 @@ class NoiseSource {
   }
 }
 
-class TadashiProcessor extends AudioWorkletProcessor {
+// `AudioWorkletProcessor` only exists in the audio thread. The page imports
+// this same module to reuse the DSP for offline rendering, so fall back to a
+// stub that satisfies the class definition.
+const WorkletBase = typeof AudioWorkletProcessor !== 'undefined'
+  ? AudioWorkletProcessor
+  : class { constructor() { this.port = { postMessage() {}, onmessage: null }; } };
+
+class TadashiProcessor extends WorkletBase {
   static get parameterDescriptors() { return []; }
 
-  constructor() {
+  constructor(options) {
     super();
-    this.sr = sampleRate;
+    // `sampleRate` is a global in the audio thread but not when the page
+    // imports this module for offline rendering, so allow an override.
+    this.sr = (options && options.sampleRate) || (typeof sampleRate !== 'undefined' ? sampleRate : 24000);
     this.params = null;
     this.t = 0;
     this.jitter = 0;
@@ -182,7 +191,7 @@ class TadashiProcessor extends AudioWorkletProcessor {
     this.formants = [new Biquad(), new Biquad(), new Biquad(), new Biquad()];
     this.body = new Biquad(); this.presence = new Biquad(); this.bright = new Biquad();
     this.noise = new NoiseSource(this.sr);
-    this.chorusDl = new DelayLine(this.sr, 40);
+    this.chorusDl = new DelayLine(this.sr, 90);
     this.echoDl = new DelayLine(this.sr, 1200);
     this.echoDamp = new Biquad();
     this.ratioBuf = new Float32Array(256);
@@ -355,4 +364,114 @@ class TadashiProcessor extends AudioWorkletProcessor {
   }
 }
 
-registerProcessor('tadashi-voice', TadashiProcessor);
+/* --------------------------------------------------------------------------
+   Offline rendering.
+
+   Used when there is no server to call (static hosting such as Vercel), and
+   for auditioning a voice without speaking into the microphone. Reuses the
+   same processor class as the live path, so what you hear when auditioning is
+   exactly what you get when you speak.
+   -------------------------------------------------------------------------- */
+
+/** F1/F2/F3 of a typical adult male tract, per vowel. */
+const VOWELS = {
+  ah: [730, 1090, 2440],
+  eh: [530, 1840, 2480],
+  ee: [270, 2290, 3010],
+  oh: [570, 840, 2410],
+  oo: [300, 870, 2240],
+};
+const VOWEL_Q = [12, 16, 18];
+
+/** Rosenberg-style glottal pulse train. Returns the block and the new phase. */
+function glottalSource(n, sr, f0, phase) {
+  const period = Math.max(sr / Math.max(f0, 1e-6), 1);
+  const out = new Float32Array(n);
+  let mean = 0;
+  for (let i = 0; i < n; i++) {
+    const frac = (((i + phase) / sr) * f0) % 1;
+    let v = 0;
+    if (frac < 0.4) v = 0.5 * (1 - Math.cos((Math.PI * frac) / 0.4));
+    else if (frac < 0.6) v = Math.cos((Math.PI * (frac - 0.4)) / 0.2);
+    out[i] = v;
+    mean += v;
+  }
+  mean /= n;
+  for (let i = 0; i < n; i++) out[i] -= mean;
+  return { out, phase: (phase + n) % period };
+}
+
+/** Render a vowel sequence at a fixed pitch, for auditioning a voice. */
+export function synthVowels(sr = 24000, f0 = 165, order = ['ah', 'eh', 'ee', 'oh', 'oo'],
+  vowelMs = 260, gapMs = 60) {
+  const block = Math.max(32, Math.round(sr * 0.010));
+  const perVowel = Math.round((sr * vowelMs) / 1000);
+  const gap = Math.round((sr * gapMs) / 1000);
+  const total = order.length * (perVowel + gap);
+  const out = new Float32Array(total);
+  const filt = [new Biquad(), new Biquad(), new Biquad()];
+
+  let phase = 0;
+  let current = VOWELS[order[0]] || VOWELS.ah;
+
+  for (let pos = 0; pos < total;) {
+    const n = Math.min(block, total - pos);
+    const src = glottalSource(n, sr, f0, phase);
+    phase = src.phase;
+
+    const seg = Math.floor(pos / (perVowel + gap));
+    const within = pos % (perVowel + gap);
+    const target = VOWELS[order[Math.min(seg, order.length - 1)]] || VOWELS.ah;
+
+    let freqs;
+    let amp;
+    if (within < perVowel) {
+      const glide = Math.min(1, within / Math.max(sr * 0.040, 1));
+      freqs = [0, 1, 2].map((i) => current[i] + (target[i] - current[i]) * glide);
+      amp = Math.min(1, within / Math.max(sr * 0.012, 1))
+        * Math.min(1, (perVowel - within) / Math.max(sr * 0.025, 1));
+    } else {
+      freqs = target;
+      amp = 0;
+      current = target;
+    }
+
+    for (let i = 0; i < 3; i++) filt[i].bandpass(sr, freqs[i], VOWEL_Q[i]);
+    for (let i = 0; i < n; i++) {
+      let s = src.out[i];
+      for (let k = 0; k < 3; k++) s = filt[k].process(s);
+      out[pos + i] = s * Math.max(0, amp);
+    }
+    pos += n;
+  }
+
+  let peak = 0;
+  for (let i = 0; i < total; i++) peak = Math.max(peak, Math.abs(out[i]));
+  if (peak > 0) for (let i = 0; i < total; i++) out[i] = (out[i] / peak) * 0.85;
+  return out;
+}
+
+/** Run a whole buffer through the voice engine, block by block. */
+export function renderOffline(input, params, sr = 24000, blockSize = 1024) {
+  const proc = new TadashiProcessor({ sampleRate: sr });
+  proc.configure(params || {});
+  const out = new Float32Array(input.length);
+  for (let s = 0; s < input.length; s += blockSize) {
+    const n = Math.min(blockSize, input.length - s);
+    const inp = new Float32Array(n);
+    inp.set(input.subarray(s, s + n));
+    const o = new Float32Array(n);
+    proc.process([[inp]], [[o]]);
+    out.set(o, s);
+  }
+  return out;
+}
+
+// Registered when loaded as an AudioWorklet; imported directly otherwise.
+if (typeof registerProcessor === 'function') {
+  registerProcessor('tadashi-voice', TadashiProcessor);
+}
+
+export { TadashiProcessor };
+
+

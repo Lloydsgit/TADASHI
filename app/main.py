@@ -14,7 +14,7 @@ from fastapi.responses import HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from . import __version__, audio, dsp, engines, synth, tts
-from .voices import NUMERIC_PARAMS, PARAM_BOUNDS, bank
+from .voices import NUMERIC_PARAMS, PARAM_BOUNDS, SCHEMA_VERSION, bank
 
 log = logging.getLogger("tadashi")
 
@@ -42,6 +42,7 @@ def health() -> dict[str, Any]:
 def list_voices() -> dict[str, Any]:
     b = bank()
     return {
+        "schema_version": SCHEMA_VERSION,
         "sample_rate": b.sample_rate,
         "categories": b.categories(),
         "defaults": b.defaults,

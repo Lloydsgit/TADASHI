@@ -127,15 +127,15 @@
     <div id="analyzeResult" class="analyze-result hidden"></div>
 
     <h2 class="panel-title mt">Agent speech</h2>
-    <p class="hint">Type text; the agent speaks it with the selected voice. In Local mode it uses on-device synthesis, then morphs it through the live engine.</p>
+    <p class="hint" id="speakHint">Type text; the agent speaks it with the selected voice. In Local mode it uses on-device synthesis, then morphs it through the live engine.</p>
     <textarea id="ttsText" rows="2" placeholder="Say something&hellip;"></textarea>
     <div class="row-2">
       <button id="speakBtn" class="accent-btn">&#128266; Speak</button>
       <button id="stopSpeakBtn" class="ghost-btn">Stop</button>
     </div>
 
-    <h2 class="panel-title mt">Server conversion</h2>
-    <p class="hint">Upload a clip and download it re-voiced by the server-side engine. Higher quality, offline processing.</p>
+    <h2 class="panel-title mt" id="convertTitle">Server conversion</h2>
+    <p class="hint" id="convertHint">Upload a clip and download it re-voiced by the server-side engine. Higher quality, offline processing.</p>
     <label class="drop-zone" id="convertZone">
       <input type="file" id="convertInput" accept="audio/*" hidden />
       <span id="convertLabel">Drop audio to convert on the server</span>
@@ -144,7 +144,7 @@
 </main>
 
 <footer class="footer">
-  <span>TADASHI v1.0 &middot; <a href="/docs" target="_blank" rel="noopener">API docs</a></span>
+  <span>TADASHI v1.0 &middot; <a id="docsLink" href="/docs" target="_blank" rel="noopener">API docs</a></span>
   <span id="footNote">Everything runs on your own machine.</span>
 </footer>
 

@@ -1,36 +1,25 @@
 /*
- * Node-side harness that runs the AudioWorklet DSP so it can be tested without
- * a browser. The worklet file only needs `AudioWorkletProcessor` and
- * `registerProcessor` to exist; `sampleRate` is a global in the audio thread,
- * so we inject it here too.
+ * Node-side harness that loads the AudioWorklet DSP so it can be tested
+ * without a browser.
+ *
+ * The worklet is an ES module that registers itself only when the audio-thread
+ * globals exist. Here we simply import it and construct the processor with an
+ * explicit sample rate, which exercises the same code the browser runs.
  */
-const fs = require('fs');
 const path = require('path');
-const vm = require('vm');
 
 const WORKLET = path.join(__dirname, '..', 'app', 'static', 'js', 'worklet.js');
 const SR = 24000;
 
-function loadProcessor() {
-  const source = fs.readFileSync(WORKLET, 'utf8');
-  let registered = null;
-  const sandbox = {
-    sampleRate: SR,
-    AudioWorkletProcessor: class { constructor() { this.port = { postMessage() {}, onmessage: null }; } },
-    registerProcessor: (name, cls) => { registered = cls; },
-    Math, Float32Array, Float64Array, Array, Object, Number, isFinite,
-    console,
-  };
-  vm.createContext(sandbox);
-  vm.runInContext(source, sandbox, { filename: 'worklet.js' });
-  if (!registered) throw new Error('worklet did not register a processor');
-  return registered;
+async function loadProcessor() {
+  const mod = await import(`file://${WORKLET}`);
+  return mod.TadashiProcessor;
 }
 
-function sine(freq, seconds, amp = 0.5) {
-  const n = Math.round(SR * seconds);
+function sine(freq, seconds, amp = 0.5, sr = SR) {
+  const n = Math.round(sr * seconds);
   const out = new Float32Array(n);
-  for (let i = 0; i < n; i++) out[i] = amp * Math.sin((2 * Math.PI * freq * i) / SR);
+  for (let i = 0; i < n; i++) out[i] = amp * Math.sin((2 * Math.PI * freq * i) / sr);
   return out;
 }
 
@@ -49,8 +38,8 @@ function render(processor, input, params, blockSize) {
   return out;
 }
 
-function dominantFreq(x) {
-  // Goertzel-style scan over a coarse grid, refined by parabolic peak fit.
+/** Coarse magnitude scan for the strongest sinusoid. */
+function dominantFreq(x, sr = SR) {
   const n = x.length;
   let best = 0;
   let bestMag = -1;
@@ -58,7 +47,7 @@ function dominantFreq(x) {
     let re = 0;
     let im = 0;
     for (let i = 0; i < n; i++) {
-      const a = (2 * Math.PI * f * i) / SR;
+      const a = (2 * Math.PI * f * i) / sr;
       re += x[i] * Math.cos(a);
       im -= x[i] * Math.sin(a);
     }
@@ -68,4 +57,16 @@ function dominantFreq(x) {
   return best;
 }
 
-module.exports = { loadProcessor, sine, render, dominantFreq, SR };
+/** Magnitude at a single frequency. */
+function magAt(x, freq, sr = SR) {
+  let re = 0;
+  let im = 0;
+  for (let i = 0; i < x.length; i++) {
+    const a = (2 * Math.PI * freq * i) / sr;
+    re += x[i] * Math.cos(a);
+    im -= x[i] * Math.sin(a);
+  }
+  return Math.sqrt(re * re + im * im) / x.length;
+}
+
+module.exports = { loadProcessor, sine, render, dominantFreq, magAt, SR };

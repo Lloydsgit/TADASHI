@@ -3,9 +3,23 @@
    - Local mode  : AudioWorklet runs the voice engine in the audio thread
    - Server mode : PCM frames stream to /ws/stream and come back transformed
    - Bypass      : raw passthrough
+
+   When the page is served statically (e.g. Vercel) there is no Python
+   backend. The engine, auditioning, mimicry, conversion and agent speech all
+   fall back to running entirely in the browser, so only Server mode - which
+   genuinely needs a backend - is unavailable.
    ========================================================================== */
 
+import {
+  analyzeVoice, presetFromAnalysis, nameFromFeatures,
+} from './analysis.js';
+import { synthVowels } from './worklet.js';
+import {
+  decodeToMono, encodeWav as encodeWavMono, render as renderBuffer, play as playBuffer,
+} from './offline.js';
+
 const SR = 24000;
+const VOICES_SCHEMA = 1;     // must match SCHEMA_VERSION in app/voices.py
 const FRAME = 1024;          // samples per streaming frame (~43 ms)
 const $ = (id) => document.getElementById(id);
 
@@ -25,6 +39,7 @@ const state = {
   workletReady: false,
   ttsTier: null,
   serverOnline: false,
+  hosted: false,            // true when there is no backend (static hosting)
   metrics: { inDb: -120, outDb: -120, latency: 0, speed: 0, engine: '—' },
 };
 
@@ -59,30 +74,92 @@ async function api(path, opts) {
 
 /* ============================== BOOTSTRAP ============================== */
 async function boot() {
+  // Try the Python backend first. On a static host there is none, and we run
+  // everything in the browser instead.
   try {
     const data = await (await api('/api/voices')).json();
     state.voices = data.voices;
     state.categories = data.categories;
     state.bounds = data.bounds;
-    renderCategories();
-    renderVoices();
-    selectVoice('natural', { silent: true });
     setServer(true);
-  } catch (err) {
+  } catch {
+    state.hosted = true;
+    const data = await (await fetch('/static/voices.json')).json();
+    if (data.schema_version !== VOICES_SCHEMA) {
+      // A stale cached build: the page and the voice bank disagree.
+      toast(`Voice bank schema v${data.schema_version}, expected v${VOICES_SCHEMA}. Hard-reload for the latest build.`, 'err');
+    }
+    state.voices = data.voices;
+    state.categories = data.categories;
+    state.bounds = data.bounds;
     setServer(false);
-    toast(`Backend unreachable: ${err.message}`, 'err');
+  }
+
+  renderCategories();
+  renderVoices();
+  selectVoice('natural', { silent: true });
+
+  if (state.hosted) {
+    // Server mode and the server-side conversion path need a backend.
+    const serverBtn = document.querySelector('#modeSwitch button[data-mode="server"]');
+    if (serverBtn) {
+      serverBtn.disabled = true;
+      serverBtn.title = 'Server mode needs the Python backend; this page is running fully in your browser.';
+    }
+    $('convertLabel').textContent = 'Drop audio to convert in your browser';
+    $('convertTitle').textContent = 'File conversion';
+    $('convertHint').textContent =
+      'Upload a clip and download it re-voiced. Decoding, the voice engine and WAV encoding all run in your browser.';
+    $('speakHint').textContent =
+      'Type text; the agent speaks it using your browser\'s own speech synthesis, with pitch matched to the selected voice.';
+    const docs = $('docsLink');
+    if (docs) docs.remove();          // no backend, so no /docs endpoint
   }
 
   try {
     const info = await (await api('/api/engines')).json();
     state.engines = info.engines;
     renderEngineSelect(info);
-  } catch { /* engines are optional for local mode */ }
+  } catch {
+    // No backend: mirror the server's tiers, but with the DSP engine running
+    // in the browser and the neural tier unavailable for the usual reason.
+    renderEngineSelect({
+      engines: [
+        {
+          id: 'neural',
+          name: 'Neural',
+          description: 'Model-based voice conversion. Highest fidelity, needs a GPU.',
+          available: false,
+          latency_ms: 120,
+          quality: 5,
+          reason: 'this build runs entirely in your browser',
+        },
+        {
+          id: 'dsp',
+          name: 'DSP (in-browser)',
+          description: 'Formant/pitch/timbre transformation in your browser. Works for all voices.',
+          available: true,
+          latency_ms: 22,
+          quality: 3,
+          reason: '',
+        },
+        {
+          id: 'natural',
+          name: 'Natural',
+          description: 'Direct passthrough of your own voice. Zero processing.',
+          available: true,
+          latency_ms: 0,
+          quality: 2,
+          reason: '',
+        },
+      ],
+    });
+  }
 
   try {
     const t = await (await api('/api/tts/voices')).json();
     state.ttsTier = t.active_tier;
-  } catch { /* TTS optional */ }
+  } catch { state.ttsTier = 'browser'; }
 
   buildSliders();
   wireEvents();
@@ -93,7 +170,13 @@ async function boot() {
 function setServer(online) {
   state.serverOnline = online;
   $('serverDot').className = `dot ${online ? 'ok' : 'bad'}`;
-  $('serverText').textContent = online ? 'server online' : 'server offline';
+  if (online) {
+    $('serverText').textContent = 'server online';
+  } else if (state.hosted) {
+    $('serverText').textContent = 'browser engine';
+  } else {
+    $('serverText').textContent = 'server offline';
+  }
 }
 
 /* ============================== VOICE BANK ============================== */
@@ -445,6 +528,10 @@ function sendConfig() {
 
 /* ============================== MODES ============================== */
 async function setMode(mode) {
+  if (mode === 'server' && state.hosted) {
+    toast('Server mode needs the Python backend. This page runs entirely in your browser.', 'err');
+    return;
+  }
   state.mode = mode;
   document.querySelectorAll('#modeSwitch button').forEach((b) => {
     b.classList.toggle('active', b.dataset.mode === mode);
@@ -460,12 +547,27 @@ async function setMode(mode) {
 
 /* ============================== AUDITION / PREVIEW ============================== */
 let auditionAudio = null;
+
+/** Audition a voice. Uses the backend when present, otherwise renders here. */
 async function audition(voiceId) {
+  if (!state.hosted) {
+    try {
+      const res = await api(`/api/preview?voice=${encodeURIComponent(voiceId)}&engine=${state.engineTier}`);
+      playBlob(await res.blob());
+      return;
+    } catch (err) {
+      toast(`Audition failed: ${err.message}`, 'err');
+      return;
+    }
+  }
   try {
-    const res = await api(`/api/preview?voice=${encodeURIComponent(voiceId)}&engine=${state.engineTier}`);
-    const blob = await res.blob();
-    playBlob(blob);
-  } catch (err) { toast(`Audition failed: ${err.message}`, 'err'); }
+    const voice = state.voices.find((v) => v.id === voiceId);
+    const params = voiceId === state.currentVoice ? fullParams() : (voice ? voice.params : {});
+    const src = synthVowels(SR, 165);
+    playBuffer(renderBuffer(src, params, SR), SR);
+  } catch (err) {
+    toast(`Audition failed: ${err.message}`, 'err');
+  }
 }
 
 function playBlob(blob) {
@@ -478,6 +580,15 @@ function playBlob(blob) {
 /* ============================== RECORDING ============================== */
 function recordChunk(buf) {
   audio.chunks.push(buf);
+}
+
+/** Concatenate recorded mono AudioBuffers into one Float32Array. */
+function flattenChunks(buffers) {
+  const total = buffers.reduce((n, b) => n + b.length, 0);
+  const out = new Float32Array(total);
+  let o = 0;
+  for (const b of buffers) { out.set(b.getChannelData(0), o); o += b.length; }
+  return out;
 }
 
 function toggleRecord() {
@@ -510,7 +621,7 @@ function stopRecording() {
     };
     audio.recorder.stop();
   } else if (audio.chunks.length) {
-    const wav = encodeWav(audio.chunks);
+    const wav = encodeWavMono(flattenChunks(audio.chunks), SR);
     const link = $('downloadLink');
     link.href = URL.createObjectURL(wav);
     link.classList.remove('hidden');
@@ -519,37 +630,27 @@ function stopRecording() {
   if (audio.localRecDest) { try { audio.localRecDest.disconnect(); } catch { /* ignore */ } }
 }
 
-function encodeWav(buffers) {
-  const total = buffers.reduce((n, b) => n + b.length, 0);
-  const data = new Float32Array(total);
-  let o = 0;
-  for (const b of buffers) { data.set(b.getChannelData(0), o); o += b.length; }
-  const buf = new ArrayBuffer(44 + total * 2);
-  const view = new DataView(buf);
-  const str = (off, s) => { for (let i = 0; i < s.length; i++) view.setUint8(off + i, s.charCodeAt(i)); };
-  str(0, 'RIFF'); view.setUint32(4, 36 + total * 2, true); str(8, 'WAVE');
-  str(12, 'fmt '); view.setUint32(16, 16, true); view.setUint16(20, 1, true);
-  view.setUint16(22, 1, true); view.setUint32(24, SR, true);
-  view.setUint32(28, SR * 2, true); view.setUint16(32, 2, true); view.setUint16(34, 16, true);
-  str(36, 'data'); view.setUint32(40, total * 2, true);
-  let p = 44;
-  for (let i = 0; i < total; i++) {
-    const s = Math.max(-1, Math.min(1, data[i]));
-    view.setInt16(p, s < 0 ? s * 0x8000 : s * 0x7fff, true);
-    p += 2;
-  }
-  return new Blob([buf], { type: 'audio/wav' });
-}
-
 /* ============================== VOICE MIMICRY ============================== */
 async function analyzeFile(file) {
   const zone = $('analyzeZone');
   zone.classList.add('busy');
   $('analyzeLabel').textContent = 'Analysing…';
   try {
-    const fd = new FormData();
-    fd.append('file', file);
-    const data = await (await api('/api/analyze', { method: 'POST', body: fd })).json();
+    let data;
+    if (state.hosted) {
+      // No backend: measure the voice here with the same algorithm.
+      const samples = await decodeToMono(await file.arrayBuffer(), SR);
+      const features = analyzeVoice(samples, SR);
+      data = {
+        features,
+        preset: presetFromAnalysis(features),
+        suggested_name: nameFromFeatures(features),
+      };
+    } else {
+      const fd = new FormData();
+      fd.append('file', file);
+      data = await (await api('/api/analyze', { method: 'POST', body: fd })).json();
+    }
     showAnalysis(data, file.name);
   } catch (err) {
     toast(`Analysis failed: ${err.message}`, 'err');
@@ -590,12 +691,58 @@ function showAnalysis(data, filename) {
 }
 
 /* ============================== AGENT SPEECH ============================== */
+/** Browser speech synthesis: pick a voice and map pitch/rate from the preset. */
+function speakInBrowser(text) {
+  return new Promise((resolve, reject) => {
+    if (!('speechSynthesis' in window)) {
+      reject(new Error('this browser has no speech synthesis'));
+      return;
+    }
+    const synth = window.speechSynthesis;
+    const u = new SpeechSynthesisUtterance(text);
+
+    const semis = Number(state.params.pitch_semitones) || 0;
+    u.pitch = Math.max(0.1, Math.min(2, Math.pow(2, semis / 12)));
+    u.rate = Math.max(0.5, Math.min(2, 1 / Math.pow(2, semis / 24)));
+
+    const voices = synth.getVoices();
+    if (voices.length) {
+      // Prefer an English voice, and bias toward a lower or higher register to
+      // suit the preset rather than always using the system default.
+      const en = voices.filter((v) => /^en/i.test(v.lang));
+      const pool = en.length ? en : voices;
+      const idx = semis < 0 ? 0 : semis > 0 ? pool.length - 1 : Math.floor(pool.length / 2);
+      u.voice = pool[Math.max(0, Math.min(pool.length - 1, idx))];
+    }
+
+    u.onend = () => resolve();
+    u.onerror = (e) => reject(new Error(e.error || 'speech failed'));
+    synth.cancel();
+    synth.speak(u);
+  });
+}
+
 async function speak() {
   const text = $('ttsText').value.trim();
   if (!text) { toast('Type something for the agent to say', ''); return; }
   const btn = $('speakBtn');
   btn.disabled = true;
   btn.textContent = 'Synthesising…';
+
+  if (state.hosted) {
+    try {
+      btn.textContent = 'Speaking…';
+      await speakInBrowser(text);
+      toast(`Spoke as ${state.currentVoice} (browser TTS)`, 'ok');
+    } catch (err) {
+      toast(`Speech failed: ${err.message}`, 'err');
+    } finally {
+      btn.disabled = false;
+      btn.textContent = '🔊 Speak';
+    }
+    return;
+  }
+
   try {
     const res = await api('/api/tts', {
       method: 'POST',
@@ -626,22 +773,36 @@ async function convertFile(file) {
   zone.classList.add('busy');
   $('convertLabel').textContent = 'Converting…';
   try {
-    const fd = new FormData();
-    fd.append('file', file);
-    const url = `/api/convert?voice=${encodeURIComponent(state.currentVoice)}&engine=${state.engineTier}`;
-    const res = await api(url, { method: 'POST', body: fd });
-    const factor = res.headers.get('X-Realtime-Factor');
-    const blob = await res.blob();
+    let blob;
+    let note;
+    if (state.hosted) {
+      const samples = await decodeToMono(await file.arrayBuffer(), SR);
+      const t0 = performance.now();
+      const morphed = renderBuffer(samples, fullParams(), SR);
+      const ms = performance.now() - t0;
+      const secs = samples.length / SR;
+      blob = encodeWavMono(morphed, SR);
+      note = `${(secs / (ms / 1000)).toFixed(1)}x realtime`;
+    } else {
+      const fd = new FormData();
+      fd.append('file', file);
+      const url = `/api/convert?voice=${encodeURIComponent(state.currentVoice)}&engine=${state.engineTier}`;
+      const res = await api(url, { method: 'POST', body: fd });
+      blob = await res.blob();
+      note = `${res.headers.get('X-Realtime-Factor')}x realtime`;
+    }
     const link = document.createElement('a');
     link.href = URL.createObjectURL(blob);
     link.download = `${file.name.replace(/\.[^.]+$/, '')}-${state.currentVoice}.wav`;
     link.click();
-    toast(`Converted (${factor}x realtime) — check your downloads`, 'ok');
+    toast(`Converted (${note}) — check your downloads`, 'ok');
   } catch (err) {
     toast(`Conversion failed: ${err.message}`, 'err');
   } finally {
     zone.classList.remove('busy');
-    $('convertLabel').textContent = 'Drop audio to convert on the server';
+    $('convertLabel').textContent = state.hosted
+      ? 'Drop audio to convert in your browser'
+      : 'Drop audio to convert on the server';
   }
 }
 

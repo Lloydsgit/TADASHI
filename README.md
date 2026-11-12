@@ -47,6 +47,38 @@ will pick up the transformed voice and you will get feedback.
 
 Use `PORT=12000 ./run.sh` to serve on a different port.
 
+## Deploy to Vercel
+
+The voice engine also runs entirely in the browser, so TADASHI works as a
+static site. `vercel.json` is already configured; either import the repository
+in the Vercel dashboard or run:
+
+```bash
+npm i -g vercel
+vercel          # preview
+vercel --prod   # production
+```
+
+Vercel runs `bash scripts/build_static.sh`, which assembles `public/` from the
+app's static assets. No environment variables, no serverless functions and no
+API keys are needed.
+
+What works on the static build: live voice morphing (the browser engine), all
+17 voices, all 21 sliders, auditioning, voice mimicry, in-browser conversion
+and agent speech via the browser's speech synthesis.
+
+One difference: **Server mode is unavailable**, because it streams PCM to the
+Python DSP and there is no Python process on Vercel. The button is disabled and
+the app says why. To get it, host the FastAPI server somewhere that can run
+Python and point the page at it.
+
+To build and check the static site locally:
+
+```bash
+bash scripts/build_static.sh
+python3 -m http.server 8000 --directory public
+```
+
 ## How it works
 
 The container has no audio hardware, so the microphone and speakers have to
@@ -187,8 +219,8 @@ Server conversion returns headers describing the work done:
 ## Tests
 
 ```bash
-python3 -m pytest          # 77 tests: DSP, API, WebSocket, static assets
-node tests/worklet_test.js # 8 tests: the browser engine, under Node
+python3 -m pytest          # 80 tests: DSP, API, WebSocket, static assets
+node tests/worklet_test.js # 15 tests: the browser engine, under Node
 ```
 
 The interesting tests are the invariant ones. Because this is a *streaming*
@@ -222,15 +254,27 @@ app/
   static/
     index.html       UI
     styles.css       Styling
+    voices.json      Voice bank for the browser build (generated; see below)
     js/app.js        Controller: modes, UI, recording, streaming
     js/worklet.js    Real-time engine (runs in the browser audio thread)
+    js/analysis.js   Feature extraction for voice mimicry, in the browser
+    js/offline.js    Decode / render / encode WAV, for in-browser conversion
 tests/
   test_dsp.py        DSP correctness and invariants
-  test_api.py        REST, WebSocket, static assets
+  test_api.py        REST, WebSocket, static assets, voice-bank sync
   worklet_test.js    Browser engine, run under Node
   worklet_harness.js Node stub for the audio-thread globals
 scripts/
   fetch_models.sh    Download Piper TTS models
+  build_static.sh    Assemble the Vercel static build into public/
+```
+
+`app/static/voices.json` is generated from the Python voice bank and must stay
+in step with `/api/voices`; `tests/test_api.py` fails if it drifts. Regenerate
+it after editing `app/data/voices.json`:
+
+```bash
+python3 scripts/export_voices.py
 ```
 
 ## Keyboard shortcuts

@@ -10,6 +10,10 @@ from typing import Any
 DATA_DIR = Path(__file__).parent / "data"
 VOICES_FILE = DATA_DIR / "voices.json"
 
+# Bumped whenever the /api/voices payload shape or voice set changes
+# incompatibly, so a stale static build can be detected.
+SCHEMA_VERSION = 1
+
 NUMERIC_PARAMS = (
     "pitch_semitones", "pitch_jitter", "formant_shift", "body_freq", "body_gain_db",
     "presence_freq", "presence_gain_db", "presence_q", "brightness_freq",
