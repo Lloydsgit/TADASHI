@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+*.egg-info/
+
+# Downloaded TTS model weights (~180 MB) - fetch with scripts/fetch_models.sh
+app/models/piper/*.onnx
+app/models/piper/*.onnx.json
+
+# Local recordings / captures
+*.webm
+takes/

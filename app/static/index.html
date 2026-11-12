@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>TADASHI &middot; Real-Time Voice Agent</title>
+<link rel="stylesheet" href="/static/styles.css" />
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#127908;</text></svg>" />
+</head>
+<body>
+<div class="scanlines" aria-hidden="true"></div>
+
+<header class="topbar">
+  <div class="brand">
+    <div class="logo" aria-hidden="true">
+      <span></span><span></span><span></span><span></span><span></span>
+    </div>
+    <div>
+      <h1>TADASHI</h1>
+      <p class="tagline">Real-time voice agent &middot; live voice morphing</p>
+    </div>
+  </div>
+  <div class="topbar-right">
+    <div class="pill" id="serverPill" title="Backend connection">
+      <span class="dot" id="serverDot"></span><span id="serverText">connecting</span>
+    </div>
+    <div class="pill" id="enginePill" title="Active conversion engine">
+      <span class="dot ok" id="engineDot"></span><span id="engineText">&mdash;</span>
+    </div>
+  </div>
+</header>
+
+<main class="layout">
+
+  <!-- ============ LEFT: transport & live meters ============ -->
+  <section class="panel panel-transport">
+    <h2 class="panel-title">Live input</h2>
+
+    <button id="micBtn" class="mic-btn" aria-pressed="false">
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M12 15a3 3 0 0 0 3-3V6a3 3 0 1 0-6 0v6a3 3 0 0 0 3 3z"/>
+        <path d="M19 11a7 7 0 0 1-14 0M12 18v3M9 21h6"/>
+      </svg>
+      <span id="micLabel">Start listening</span>
+    </button>
+
+    <div class="meter-block">
+      <div class="meter-row">
+        <label>In</label>
+        <div class="meter"><i id="inMeter"></i></div>
+        <span class="db" id="inDb">&minus;&infin;</span>
+      </div>
+      <div class="meter-row">
+        <label>Out</label>
+        <div class="meter"><i id="outMeter" class="out"></i></div>
+        <span class="db" id="outDb">&minus;&infin;</span>
+      </div>
+    </div>
+
+    <canvas id="scope" class="scope" height="90" aria-label="Waveform"></canvas>
+
+    <div class="stat-grid">
+      <div><span id="statEngine">&mdash;</span><small>engine</small></div>
+      <div><span id="statLatency">&mdash;</span><small>latency</small></div>
+      <div><span id="statSpeed">&mdash;</span><small>speed</small></div>
+      <div><span id="statVoice">&mdash;</span><small>voice</small></div>
+    </div>
+
+    <div class="row-2">
+      <button id="monitorBtn" class="ghost-btn" aria-pressed="true">Monitor off</button>
+      <button id="recordBtn" class="ghost-btn" aria-pressed="false">Record</button>
+    </div>
+    <a id="downloadLink" class="ghost-btn hidden" download="tadashi-voice.webm">Download take</a>
+
+    <h2 class="panel-title mt">Routing</h2>
+    <div class="segmented" id="modeSwitch" role="tablist">
+      <button data-mode="local" class="active" role="tab">Local</button>
+      <button data-mode="server" role="tab">Server</button>
+      <button data-mode="natural" role="tab">Bypass</button>
+    </div>
+    <p class="hint" id="modeHint">Local runs the voice engine inside your browser audio thread &mdash; lowest latency.</p>
+
+    <label class="select-row">
+      <span>Engine tier</span>
+      <select id="engineSelect"></select>
+    </label>
+    <p class="hint" id="engineHint"></p>
+  </section>
+
+  <!-- ============ CENTER: voice bank ============ -->
+  <section class="panel panel-voices">
+    <div class="panel-head">
+      <h2 class="panel-title">Voice bank</h2>
+      <div class="search-wrap">
+        <input id="voiceSearch" type="search" placeholder="Filter voices&hellip;" aria-label="Filter voices" />
+      </div>
+    </div>
+    <div class="chips" id="categoryChips"></div>
+    <div class="voice-grid" id="voiceGrid" role="listbox" aria-label="Voices"></div>
+
+    <div class="preview-bar">
+      <button id="previewBtn" class="accent-btn">&#9654; Audition selected voice</button>
+      <span class="hint" id="previewHint">Synthesised vowels run through the real voice engine.</span>
+    </div>
+  </section>
+
+  <!-- ============ RIGHT: tuning, mimicry, agent ============ -->
+  <section class="panel panel-tune">
+    <h2 class="panel-title">Voice tuning</h2>
+    <div class="current-voice" id="currentVoice">
+      <span class="cv-icon" id="cvIcon">&#9679;</span>
+      <div>
+        <strong id="cvName">NATURAL</strong>
+        <small id="cvTagline">Your true voice, untouched</small>
+      </div>
+      <button id="resetBtn" class="mini-btn" title="Reset to preset">reset</button>
+    </div>
+
+    <div class="sliders" id="sliders"></div>
+
+    <h2 class="panel-title mt">Voice mimicry</h2>
+    <p class="hint">Upload a recording of any voice. TADASHI measures its pitch and timbre, then builds a matching preset you can apply live.</p>
+    <label class="drop-zone" id="analyzeZone">
+      <input type="file" id="analyzeInput" accept="audio/*" hidden />
+      <span id="analyzeLabel">Drop an audio file or click to analyse</span>
+    </label>
+    <div id="analyzeResult" class="analyze-result hidden"></div>
+
+    <h2 class="panel-title mt">Agent speech</h2>
+    <p class="hint">Type text; the agent speaks it with the selected voice. In Local mode it uses on-device synthesis, then morphs it through the live engine.</p>
+    <textarea id="ttsText" rows="2" placeholder="Say something&hellip;"></textarea>
+    <div class="row-2">
+      <button id="speakBtn" class="accent-btn">&#128266; Speak</button>
+      <button id="stopSpeakBtn" class="ghost-btn">Stop</button>
+    </div>
+
+    <h2 class="panel-title mt">Server conversion</h2>
+    <p class="hint">Upload a clip and download it re-voiced by the server-side engine. Higher quality, offline processing.</p>
+    <label class="drop-zone" id="convertZone">
+      <input type="file" id="convertInput" accept="audio/*" hidden />
+      <span id="convertLabel">Drop audio to convert on the server</span>
+    </label>
+  </section>
+</main>
+
+<footer class="footer">
+  <span>TADASHI v1.0 &middot; <a href="/docs" target="_blank" rel="noopener">API docs</a></span>
+  <span id="footNote">Everything runs on your own machine.</span>
+</footer>
+
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+<script src="/static/js/app.js" type="module"></script>
+</body>
+</html>
